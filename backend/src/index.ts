@@ -1,7 +1,19 @@
 import express from 'express';
 import http from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
-import { WORDS } from './words';
+// read large words array from json
+import fs from 'fs';
+import path from 'path';
+
+let WORDS: string[] = [];
+try {
+  const wordsRaw = fs.readFileSync(path.join(__dirname, 'words.json'), 'utf8');
+  const wordsObj = JSON.parse(wordsRaw);
+  // flatten all categories if needed, or just English (Original)
+  WORDS = Object.values(wordsObj).flat() as string[];
+} catch(e) {
+  WORDS = ["APPLE", "BANANA", "ORANGE", "PEAR", "GRAPE", "MELON", "LEMON", "CHERRY", "PEACH", "PLUM", "KIWI", "MANGO", "FIG", "LIME", "DATE", "PINEAPPLE", "BERRY", "OLIVE", "BEAN", "CORN", "RICE", "WHEAT", "OAT", "RYE", "BARLEY"]; 
+}
 
 const app = express();
 const server = http.createServer(app);
@@ -19,14 +31,24 @@ interface GameState {
   redLeft: number;
   blueLeft: number;
   clue: { word: string; count: number } | null;
+  timerDurationMs: number | null;
+  enforceTimer: boolean;
+  roundStartedAt: number;
+  timerHandle?: NodeJS.Timeout | null;
 }
 
 const rooms: Record<string, GameState> = {};
 
 function shuffle(array: any[]) { return array.sort(() => Math.random() - 0.5); }
 
-function generateBoard(): Card[] {
-  const chosenWords = shuffle([...WORDS]).slice(0, 25);
+function generateBoard(customWords: string[] = []): Card[] {
+  // Combine custom words with normal words
+  let availableWords = [...new Set([...customWords, ...WORDS])];
+  if (availableWords.length < 25) {
+     // pad with generic words just in case
+     availableWords = [...availableWords, ...WORDS];
+  }
+  const chosenWords = shuffle(availableWords).slice(0, 25);
   const starter = Math.random() < 0.5 ? 'red' : 'blue';
   const types = [
     ...Array(starter === 'red' ? 9 : 8).fill('red'),
@@ -38,15 +60,36 @@ function generateBoard(): Card[] {
   return chosenWords.map((word, i) => ({ id: i, word, type: types[i], revealed: false }));
 }
 
-function createRoom(roomId: string) {
-  const board = generateBoard();
+function createRoom(roomId: string, opts: any = {}) {
+  const board = generateBoard(opts.customWords || []);
   const redCount = board.filter(c => c.type === 'red').length;
   rooms[roomId] = {
     roomId, players: {}, board,
     currentTurn: redCount === 9 ? 'red' : 'blue',
     winner: null, log: [], redLeft: redCount, blueLeft: board.filter(c => c.type === 'blue').length,
-    clue: null
+    clue: null,
+    timerDurationMs: opts.timerDurationMs || null,
+    enforceTimer: !!opts.enforceTimer,
+    roundStartedAt: Date.now(),
+    timerHandle: null
   };
+  startTimer(roomId);
+}
+
+function startTimer(roomId: string) {
+  const room = rooms[roomId];
+  if (!room || !room.enforceTimer || !room.timerDurationMs) return;
+  if (room.timerHandle) clearTimeout(room.timerHandle);
+  
+  room.timerHandle = setTimeout(() => {
+    if (room.winner) return;
+    room.currentTurn = room.currentTurn === 'red' ? 'blue' : 'red';
+    room.clue = null;
+    room.log.push(`Time's up! Turn passes to ${room.currentTurn.toUpperCase()}.`);
+    room.roundStartedAt = Date.now();
+    startTimer(roomId);
+    broadcast(roomId);
+  }, room.timerDurationMs);
 }
 
 function broadcast(roomId: string) {
@@ -64,6 +107,9 @@ function broadcast(roomId: string) {
         roomId, currentTurn: room.currentTurn, winner: room.winner,
         redLeft: room.redLeft, blueLeft: room.blueLeft,
         clue: room.clue, log: room.log, board,
+        timerDurationMs: room.timerDurationMs,
+        enforceTimer: room.enforceTimer,
+        roundStartedAt: room.roundStartedAt,
         players: Object.values(room.players).map(pl => ({ id: pl.id, name: pl.name, team: pl.team, role: pl.role })),
         me: { team: p.team, role: p.role }
       }
@@ -86,7 +132,11 @@ wss.on('connection', (ws) => {
     
     if (data.type === 'join') {
       cRoom = data.roomId;
-      if (!rooms[cRoom!]) createRoom(cRoom!);
+      if (!rooms[cRoom!]) createRoom(cRoom!, {
+          customWords: data.customWords,
+          timerDurationMs: data.timerDurationMs,
+          enforceTimer: data.enforceTimer
+      });
       rooms[cRoom!].players[pId] = { id: pId, name: data.name, ws, team: null, role: null };
       rooms[cRoom!].log.push(`${data.name} joined.`);
       broadcast(cRoom!);
@@ -115,6 +165,8 @@ wss.on('connection', (ws) => {
       card.revealed = true;
       room.log.push(`${me.name} guessed ${card.word}. It was ${card.type}.`);
       
+      let passTurn = false;
+
       if (card.type === 'assassin') {
         room.winner = me.team === 'red' ? 'blue' : 'red';
         room.log.push(`Assassin revealed! ${room.winner.toUpperCase()} wins!`);
@@ -132,9 +184,15 @@ wss.on('connection', (ws) => {
              room.log.push(`${room.winner.toUpperCase()} wins by default!`);
           }
         }
+        passTurn = true;
+      }
+
+      if (passTurn) {
         room.currentTurn = room.currentTurn === 'red' ? 'blue' : 'red';
         room.clue = null;
+        room.roundStartedAt = Date.now();
         room.log.push(`Turn passes to ${room.currentTurn.toUpperCase()}.`);
+        startTimer(cRoom);
       }
       broadcast(cRoom);
     }
@@ -142,7 +200,9 @@ wss.on('connection', (ws) => {
     if (data.type === 'endTurn' && me.team === room.currentTurn && me.role === 'operative' && !room.winner) {
       room.currentTurn = room.currentTurn === 'red' ? 'blue' : 'red';
       room.clue = null;
+      room.roundStartedAt = Date.now();
       room.log.push(`${me.name} ended the turn. Turn passes to ${room.currentTurn.toUpperCase()}.`);
+      startTimer(cRoom);
       broadcast(cRoom);
     }
   });
@@ -159,3 +219,5 @@ wss.on('connection', (ws) => {
 
 const PORT = process.env.PORT || 8080;
 server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+
+export { app, server, wss, createRoom, rooms, startTimer }; // export for tests

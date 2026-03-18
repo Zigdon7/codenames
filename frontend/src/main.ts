@@ -6,12 +6,17 @@ let myName = '';
 let myTeam: 'red' | 'blue' | null = null;
 let myRole: 'spymaster' | 'operative' | null = null;
 let state: any = null;
+let customWords: string[] = [];
+let timerDurationMs: number | null = null;
+let enforceTimer = false;
 
 const app = document.querySelector<HTMLDivElement>('#app')!
 
 function connect() {
   ws = new WebSocket('ws://localhost:8080');
-  ws.onopen = () => ws.send(JSON.stringify({ type: 'join', name: myName, roomId }));
+  ws.onopen = () => ws.send(JSON.stringify({ 
+    type: 'join', name: myName, roomId, customWords, timerDurationMs, enforceTimer 
+  }));
   ws.onmessage = (msg) => {
     const data = JSON.parse(msg.data);
     if (data.type === 'state') {
@@ -26,6 +31,16 @@ function connect() {
 function joinGame() {
   myName = (document.getElementById('name') as HTMLInputElement).value;
   roomId = (document.getElementById('room') as HTMLInputElement).value;
+  
+  const customStr = (document.getElementById('custom-words') as HTMLInputElement).value;
+  customWords = customStr ? customStr.split(',').map(s => s.trim().toUpperCase()) : [];
+  
+  const timerSecs = Number((document.getElementById('timer-secs') as HTMLInputElement).value);
+  if (timerSecs > 0) {
+    timerDurationMs = timerSecs * 1000;
+    enforceTimer = true;
+  }
+  
   if (!myName || !roomId) return alert("Enter name and room");
   connect();
 }
@@ -57,6 +72,9 @@ function render() {
       <h1>Codenames</h1>
       <input id="name" placeholder="Your Name" />
       <input id="room" placeholder="Room ID" value="game1" />
+      <br/><br/>
+      <input id="custom-words" placeholder="Custom words (comma separated)" />
+      <input id="timer-secs" type="number" placeholder="Timer seconds (e.g. 60)" />
       <button id="join-btn">Join</button>
     `;
     document.getElementById('join-btn')!.onclick = joinGame;
@@ -87,9 +105,10 @@ function render() {
       <div class="status-red">Red: ${state.redLeft} left</div>
       <div>Turn: <span class="status-${state.currentTurn}">${state.currentTurn.toUpperCase()}</span></div>
       <div class="status-blue">Blue: ${state.blueLeft} left</div>
+      ${state.enforceTimer ? \`<div class="timer">Timer active...</div>\` : ''}
     </div>
-    ${state.winner ? `<h2>Winner: <span class="status-${state.winner}">${state.winner.toUpperCase()}</span></h2>` : ''}
-    ${state.clue ? `<h3>Clue: ${state.clue.word} (${state.clue.count})</h3>` : ''}
+    ${state.winner ? \`<h2>Winner: <span class="status-\${state.winner}">\${state.winner.toUpperCase()}</span></h2>\` : ''}
+    ${state.clue ? \`<h3>Clue: \${state.clue.word} (\${state.clue.count})</h3>\` : ''}
     <div class="board">
       ${state.board.map((c: any) => `
         <div class="card type-${c.type} ${c.revealed ? 'revealed' : ''}" data-id="${c.id}">
