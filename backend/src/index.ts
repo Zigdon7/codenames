@@ -1,0 +1,161 @@
+import express from 'express';
+import http from 'http';
+import { WebSocketServer, WebSocket } from 'ws';
+import { WORDS } from './words';
+
+const app = express();
+const server = http.createServer(app);
+const wss = new WebSocketServer({ server });
+
+interface Card { id: number; word: string; type: 'red' | 'blue' | 'neutral' | 'assassin'; revealed: boolean; }
+interface Player { id: string; name: string; ws: WebSocket; team: 'red' | 'blue' | null; role: 'spymaster' | 'operative' | null; }
+interface GameState {
+  roomId: string;
+  players: Record<string, Player>;
+  board: Card[];
+  currentTurn: 'red' | 'blue';
+  winner: 'red' | 'blue' | null;
+  log: string[];
+  redLeft: number;
+  blueLeft: number;
+  clue: { word: string; count: number } | null;
+}
+
+const rooms: Record<string, GameState> = {};
+
+function shuffle(array: any[]) { return array.sort(() => Math.random() - 0.5); }
+
+function generateBoard(): Card[] {
+  const chosenWords = shuffle([...WORDS]).slice(0, 25);
+  const starter = Math.random() < 0.5 ? 'red' : 'blue';
+  const types = [
+    ...Array(starter === 'red' ? 9 : 8).fill('red'),
+    ...Array(starter === 'blue' ? 9 : 8).fill('blue'),
+    ...Array(7).fill('neutral'),
+    'assassin'
+  ];
+  shuffle(types);
+  return chosenWords.map((word, i) => ({ id: i, word, type: types[i], revealed: false }));
+}
+
+function createRoom(roomId: string) {
+  const board = generateBoard();
+  const redCount = board.filter(c => c.type === 'red').length;
+  rooms[roomId] = {
+    roomId, players: {}, board,
+    currentTurn: redCount === 9 ? 'red' : 'blue',
+    winner: null, log: [], redLeft: redCount, blueLeft: board.filter(c => c.type === 'blue').length,
+    clue: null
+  };
+}
+
+function broadcast(roomId: string) {
+  const room = rooms[roomId];
+  if (!room) return;
+  const stateToPlayers = Object.values(room.players).map(p => {
+    const isSpymaster = p.role === 'spymaster';
+    const board = room.board.map(c => ({
+      ...c,
+      type: (c.revealed || isSpymaster || room.winner) ? c.type : 'hidden'
+    }));
+    return {
+      ws: p.ws,
+      state: {
+        roomId, currentTurn: room.currentTurn, winner: room.winner,
+        redLeft: room.redLeft, blueLeft: room.blueLeft,
+        clue: room.clue, log: room.log, board,
+        players: Object.values(room.players).map(pl => ({ id: pl.id, name: pl.name, team: pl.team, role: pl.role })),
+        me: { team: p.team, role: p.role }
+      }
+    };
+  });
+  
+  stateToPlayers.forEach(({ ws, state }) => {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'state', state }));
+    }
+  });
+}
+
+wss.on('connection', (ws) => {
+  let pId = Math.random().toString(36).slice(2, 9);
+  let cRoom: string | null = null;
+
+  ws.on('message', (msg) => {
+    const data = JSON.parse(msg.toString());
+    
+    if (data.type === 'join') {
+      cRoom = data.roomId;
+      if (!rooms[cRoom!]) createRoom(cRoom!);
+      rooms[cRoom!].players[pId] = { id: pId, name: data.name, ws, team: null, role: null };
+      rooms[cRoom!].log.push(`${data.name} joined.`);
+      broadcast(cRoom!);
+    }
+    
+    if (!cRoom || !rooms[cRoom]) return;
+    const room = rooms[cRoom];
+    const me = room.players[pId];
+
+    if (data.type === 'setRole') {
+      me.team = data.team; me.role = data.role;
+      room.log.push(`${me.name} joined ${data.team} as ${data.role}.`);
+      broadcast(cRoom);
+    }
+    
+    if (data.type === 'giveClue' && me.team === room.currentTurn && me.role === 'spymaster' && !room.clue && !room.winner) {
+      room.clue = { word: data.word, count: Number(data.count) };
+      room.log.push(`[${me.team.toUpperCase()}] Clue: ${data.word} (${data.count})`);
+      broadcast(cRoom);
+    }
+    
+    if (data.type === 'guess' && me.team === room.currentTurn && me.role === 'operative' && room.clue && !room.winner) {
+      const card = room.board.find(c => c.id === data.cardId);
+      if (!card || card.revealed) return;
+      
+      card.revealed = true;
+      room.log.push(`${me.name} guessed ${card.word}. It was ${card.type}.`);
+      
+      if (card.type === 'assassin') {
+        room.winner = me.team === 'red' ? 'blue' : 'red';
+        room.log.push(`Assassin revealed! ${room.winner.toUpperCase()} wins!`);
+      } else if (card.type === me.team) {
+        if (me.team === 'red') room.redLeft--; else room.blueLeft--;
+        if (room.redLeft === 0 || room.blueLeft === 0) {
+          room.winner = me.team;
+          room.log.push(`${me.team.toUpperCase()} reveals all words and wins!`);
+        }
+      } else {
+        if (card.type === (me.team === 'red' ? 'blue' : 'red')) {
+          if (me.team === 'red') room.blueLeft--; else room.redLeft--;
+          if (room.redLeft === 0 || room.blueLeft === 0) {
+             room.winner = me.team === 'red' ? 'blue' : 'red';
+             room.log.push(`${room.winner.toUpperCase()} wins by default!`);
+          }
+        }
+        room.currentTurn = room.currentTurn === 'red' ? 'blue' : 'red';
+        room.clue = null;
+        room.log.push(`Turn passes to ${room.currentTurn.toUpperCase()}.`);
+      }
+      broadcast(cRoom);
+    }
+    
+    if (data.type === 'endTurn' && me.team === room.currentTurn && me.role === 'operative' && !room.winner) {
+      room.currentTurn = room.currentTurn === 'red' ? 'blue' : 'red';
+      room.clue = null;
+      room.log.push(`${me.name} ended the turn. Turn passes to ${room.currentTurn.toUpperCase()}.`);
+      broadcast(cRoom);
+    }
+  });
+
+  ws.on('close', () => {
+    if (cRoom && rooms[cRoom]) {
+      const name = rooms[cRoom].players[pId]?.name;
+      delete rooms[cRoom].players[pId];
+      if (name) rooms[cRoom].log.push(`${name} disconnected.`);
+      broadcast(cRoom);
+    }
+  });
+});
+
+const PORT = process.env.PORT || 8080;
+server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
