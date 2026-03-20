@@ -13,7 +13,9 @@ let enforceTimer = false;
 const app = document.querySelector<HTMLDivElement>('#app')!
 
 function connect() {
-  ws = new WebSocket('ws://localhost:8080');
+  const wsHost = window.location.hostname;
+  const wsPort = 8080;
+  ws = new WebSocket(`ws://${wsHost}:${wsPort}`);
   ws.onopen = () => ws.send(JSON.stringify({ 
     type: 'join', name: myName, roomId, customWords, timerDurationMs, enforceTimer 
   }));
@@ -100,40 +102,51 @@ function render() {
     return;
   }
 
+  const timerHtml = state.enforceTimer ? '<div class="timer">Timer active...</div>' : '';
+  const winnerHtml = state.winner ? '<h2>Winner: <span class="status-' + state.winner + '">' + state.winner.toUpperCase() + '</span></h2>' : '';
+  const clueHtml = state.clue ? '<h3>Clue: ' + state.clue.word + ' (' + state.clue.count + ')</h3>' : '';
+  // Simple deterministic icon per word (hash to pick from set)
+  const icons = ['🏠','🌲','⭐','🔑','💎','🎯','🗡️','🛡️','👤','📦','🔔','🕶️','🎭','🧭','⚓','🔮','🪶','🎪','🏰','🗿'];
+  function wordIcon(word: string) {
+    let h = 0;
+    for (let i = 0; i < word.length; i++) h = ((h << 5) - h + word.charCodeAt(i)) | 0;
+    return icons[Math.abs(h) % icons.length];
+  }
+
+  const boardHtml = state.board.map((c: any) => {
+    const spyClass = (!c.revealed && myRole === 'spymaster' && c.type !== 'hidden') ? ' spy-' + c.type : '';
+    return '<div class="card type-' + c.type + (c.revealed ? ' revealed' : '') + spyClass + '" data-id="' + c.id + '">'
+      + '<div class="card-bar"></div>'
+      + '<div class="card-img"><span style="font-size:2em">' + wordIcon(c.word) + '</span></div>'
+      + '<div class="card-word">' + c.word + '</div>'
+      + '</div>';
+  }).join('');
+  const spymasterControls = (myRole === 'spymaster' && myTeam === state.currentTurn && !state.clue && !state.winner)
+    ? '<input id="clue-word" placeholder="Clue word" /><input id="clue-count" type="number" min="1" max="9" placeholder="#" style="width: 50px;" /><button id="give-clue">Give Clue</button>'
+    : '';
+  const opControls = (myRole === 'operative' && myTeam === state.currentTurn && state.clue && !state.winner)
+    ? '<button id="end-turn">End Turn</button>'
+    : '';
+  const logHtml = state.log.map((l: string) => '<div>' + l + '</div>').join('');
+
   app.innerHTML = `
     <div class="status-bar">
       <div class="status-red">Red: ${state.redLeft} left</div>
       <div>Turn: <span class="status-${state.currentTurn}">${state.currentTurn.toUpperCase()}</span></div>
       <div class="status-blue">Blue: ${state.blueLeft} left</div>
-      ${state.enforceTimer ? \`<div class="timer">Timer active...</div>\` : ''}
+      ${timerHtml}
     </div>
-    ${state.winner ? \`<h2>Winner: <span class="status-\${state.winner}">\${state.winner.toUpperCase()}</span></h2>\` : ''}
-    ${state.clue ? \`<h3>Clue: \${state.clue.word} (\${state.clue.count})</h3>\` : ''}
-    <div class="board">
-      ${state.board.map((c: any) => `
-        <div class="card type-${c.type} ${c.revealed ? 'revealed' : ''}" data-id="${c.id}">
-          ${c.word}
-        </div>
-      `).join('')}
-    </div>
-    <div class="controls">
-      ${myRole === 'spymaster' && myTeam === state.currentTurn && !state.clue && !state.winner ? `
-        <input id="clue-word" placeholder="Clue word" />
-        <input id="clue-count" type="number" min="1" max="9" placeholder="#" style="width: 50px;" />
-        <button id="give-clue">Give Clue</button>
-      ` : ''}
-      ${myRole === 'operative' && myTeam === state.currentTurn && state.clue && !state.winner ? `
-        <button id="end-turn">End Turn</button>
-      ` : ''}
-    </div>
-    <div class="log">
-      ${state.log.map((l: string) => `<div>${l}</div>`).join('')}
-    </div>
+    ${winnerHtml}
+    ${clueHtml}
+    <div class="board">${boardHtml}</div>
+    <div class="controls">${spymasterControls}${opControls}</div>
+    <div class="log">${logHtml}</div>
   `;
 
   document.querySelectorAll('.card').forEach(el => {
     el.addEventListener('click', (e) => {
-      guess(Number((e.target as HTMLElement).dataset.id));
+      const card = (e.target as HTMLElement).closest('.card') as HTMLElement;
+      if (card) guess(Number(card.dataset.id));
     });
   });
 

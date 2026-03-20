@@ -9,8 +9,13 @@ let WORDS: string[] = [];
 try {
   const wordsRaw = fs.readFileSync(path.join(__dirname, 'words.json'), 'utf8');
   const wordsObj = JSON.parse(wordsRaw);
-  // flatten all categories if needed, or just English (Original)
-  WORDS = Object.values(wordsObj).flat() as string[];
+  // English sets only — deduplicated
+  const englishSets = ['English (Original)', 'English (Duet)', 'English (Deep Undercover) [MA]'];
+  const allEnglish: string[] = [];
+  for (const key of englishSets) {
+    if (wordsObj[key]) allEnglish.push(...wordsObj[key]);
+  }
+  WORDS = [...new Set(allEnglish)];
 } catch(e) {
   WORDS = ["APPLE", "BANANA", "ORANGE", "PEAR", "GRAPE", "MELON", "LEMON", "CHERRY", "PEACH", "PLUM", "KIWI", "MANGO", "FIG", "LIME", "DATE", "PINEAPPLE", "BERRY", "OLIVE", "BEAN", "CORN", "RICE", "WHEAT", "OAT", "RYE", "BARLEY"]; 
 }
